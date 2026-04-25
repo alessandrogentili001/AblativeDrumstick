@@ -1,88 +1,100 @@
-# Chicken From Space
+# AblativeDrumstick
 
-`chicken_from_space` is a small Python project that explores a deliberately odd physics question:
+`AblativeDrumstick` is a physics playground for an extremely serious scientific question:
 
-Could a chicken be "cooked" by dropping it from space and letting atmospheric drag dissipate energy during re-entry?
+Can a chicken be cooked by dropping it from space?
 
-This first version does **not** model cooking or internal heat transfer. It only simulates a vertical fall through a simplified Earth atmosphere and estimates how much drag energy is dissipated, plus a configurable fraction of that energy that might couple into the chicken.
+Not metaphorically. Not poetically. Literally.
 
-## Main assumptions
+This repository starts with the first thing we need before anyone talks about roasting, browning, or food safety: a clean numerical model of atmospheric fall and drag dissipation.
 
-- One-dimensional vertical motion only.
-- Downward velocity is taken as positive.
-- The chicken is approximated as an equivalent sphere.
-- Drag is quadratic in speed.
-- Atmospheric density follows a simple exponential model.
-- Gravity is constant.
-- Time integration uses a Diffrax adaptive explicit Runge-Kutta solver (`Dopri5`).
-- A fixed fraction of drag-dissipated energy is treated as energy transferred to the chicken.
+## What This Version Does
 
-## Model limits
+This first version simulates a chicken falling vertically through Earth’s atmosphere and estimates:
 
-- No lift, tumbling, or attitude dynamics.
-- No compressibility or supersonic corrections.
-- No altitude-dependent gravity.
-- No shock-layer or ablation physics.
-- No thermal model and no internal cooking model yet.
+- altitude over time
+- velocity over time
+- atmospheric density along the path
+- drag force
+- local terminal velocity
+- drag power dissipation
+- total drag-dissipated energy
+- a configurable estimate of how much of that energy reaches the chicken
 
-This makes the code intentionally modest, readable, and easy to extend.
+It does **not** model internal heating or cooking yet. This is the “how hard did the atmosphere bully the drumstick?” phase.
 
-## Installation
+## Working Model
 
-Create or activate a Python 3.11 environment, then install the project:
+The current model is intentionally simple and easy to extend:
+
+- 1D vertical motion only
+- downward velocity treated as positive
+- chicken approximated as an equivalent sphere
+- exponential atmosphere
+- constant gravity
+- quadratic drag
+- adaptive Diffrax time integration
+- fixed energy-transfer fraction from drag dissipation to chicken
+
+The code is meant to stay readable first, fancy second.
+
+## What It Leaves Out
+
+For now, this model ignores:
+
+- lift, tumbling, and attitude changes
+- compressibility and supersonic drag corrections
+- altitude-dependent gravity
+- shock-layer chemistry
+- ablation, charring, or mass loss
+- thermal diffusion inside the chicken
+- actual cooking
+
+So no, the repo does not yet answer whether the center reaches a safe temperature. It only tells us how violent the fall is.
+
+## Install
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-If you are using the `cock` conda environment created for this repo:
+## Run
+
+Run the default simulation:
 
 ```bash
-conda run -n cock python -m pip install -e ".[dev]"
+python scripts/run_basic_simulation.py
 ```
 
-## Run a basic simulation
+Save the output data if you want to inspect it later:
 
 ```bash
-conda run -n cock python scripts/run_basic_simulation.py
+python scripts/run_basic_simulation.py --output results/basic_run.npz
+python scripts/run_basic_simulation.py --output results/basic_run.csv
 ```
-
-Optionally save the trajectory and diagnostic arrays:
-
-```bash
-conda run -n cock python scripts/run_basic_simulation.py --output results/basic_run.npz
-conda run -n cock python scripts/run_basic_simulation.py --output results/basic_run.csv
-```
-
-## What the simulation reports
-
-- Vertical trajectory
-- Velocity over time
-- Atmospheric density along the path
-- Drag force
-- Local terminal velocity
-- Drag power dissipation
-- Total drag-dissipated energy
-- Estimated energy transferred to the chicken
 
 ## Why JAX
 
-The code uses `jax.numpy` for the numerical pieces while keeping the control flow simple and readable. That keeps the project easy to understand now and leaves a natural path toward future JIT compilation, batched parameter sweeps, `lax.scan`, and hardware acceleration.
+The numerical pieces use `jax.numpy`, and the solver is built on Diffrax. The current code is still small and human-readable, but the structure is pointing toward the future:
 
-For local development on macOS, the starter setup uses a standard CPU JAX install. A future scaling pass can swap in the platform-specific accelerator backend you want to target.
+- accelerator-friendly parameter sweeps
+- larger batches of simulations
+- more ambitious thermal models
+- cleaner scaling once the project gets weird enough to deserve it
+
+## Where This Is Going
+
+Natural next steps include:
+
+- better atmosphere models
+- altitude-dependent gravity
+- more realistic drag behavior
+- compressible and high-Mach effects
+- thermal coupling to the chicken surface
+- internal cooking / heat diffusion
+- plotting, notebooks, and reports
+- parameter studies and sensitivity analysis
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Next steps
-
-- More realistic atmosphere models
-- Altitude-dependent gravity
-- Drag coefficient changes with Reynolds/Mach number
-- Compressibility and supersonic effects
-- Thermal coupling and chicken temperature model
-- Internal cooking model
-- Plotting and notebooks
-- Parameter sweeps and reporting
-- Richer docs, tutorials, and analysis outputs
