@@ -11,7 +11,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from chicken_from_space.config import SimulationConfig
+from chicken_from_space.config import Config
 from chicken_from_space.simulation import (
     format_summary,
     run_simulation,
@@ -39,7 +39,7 @@ def main() -> None:
     """Run the default simulation and print a compact summary."""
 
     args = parse_args()
-    result = run_simulation(SimulationConfig())
+    result = run_simulation(Config())
     summary = summarize_simulation(result)
     print(format_summary(summary))
 

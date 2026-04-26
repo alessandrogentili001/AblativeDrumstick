@@ -2,17 +2,19 @@
 
 import pytest
 
-from chicken_from_space.config import SimulationConfig
+from chicken_from_space.config import Config, Simulation
 from chicken_from_space.simulation import run_simulation
 
 
 def test_simulation_reaches_ground_and_accumulates_energy() -> None:
     """A short drop should reach the ground with non-negative energy."""
 
-    config = SimulationConfig(
-        initial_altitude_m=1_000.0,
-        time_step_s=0.05,
-        max_time_s=300.0,
+    config = Config(
+        simulation=Simulation(
+            initial_altitude_m=1_000.0,
+            initial_time_step_s=0.05,
+            max_time_s=300.0,
+        ),
     )
     result = run_simulation(config)
 

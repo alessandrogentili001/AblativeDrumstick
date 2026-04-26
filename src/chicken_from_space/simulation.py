@@ -2,14 +2,13 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
 
 import diffrax
 import jax.numpy as jnp
 import numpy as np
 
 from chicken_from_space.atmosphere import density_at_altitude
-from chicken_from_space.config import SimulationConfig
+from chicken_from_space.config import Config
 from chicken_from_space.physics import (
     cross_sectional_area,
     drag_force_magnitude,
@@ -18,23 +17,11 @@ from chicken_from_space.physics import (
 )
 
 
-class SolverArgs(NamedTuple):
-    """Minimal numeric parameters passed into Diffrax."""
-
-    mass_kg: float
-    drag_coefficient: float
-    reference_area_m2: float
-    gravity_m_per_s2: float
-    sea_level_density_kg_per_m3: float
-    scale_height_m: float
-    min_density_kg_per_m3: float
-
-
 @dataclass(frozen=True)
 class SimulationResult:
     """Full time history and integrated energies."""
 
-    config: SimulationConfig
+    config: Config
     hit_ground: bool
     time_s: jnp.ndarray
     altitude_m: jnp.ndarray
@@ -78,69 +65,10 @@ class SimulationSummary:
     energy_transfer_fraction: float
 
 
-def _build_solver_args(
-    config: SimulationConfig,
-    reference_area_m2: float,
-) -> SolverArgs:
-    """Convert configuration objects into plain numeric solver arguments."""
-
-    return SolverArgs(
-        mass_kg=config.chicken.mass_kg,
-        drag_coefficient=config.chicken.drag_coefficient,
-        reference_area_m2=reference_area_m2,
-        gravity_m_per_s2=config.gravity_m_per_s2,
-        sea_level_density_kg_per_m3=config.atmosphere.sea_level_density_kg_per_m3,
-        scale_height_m=config.atmosphere.scale_height_m,
-        min_density_kg_per_m3=config.atmosphere.min_density_kg_per_m3,
-    )
-
-
-def _density_from_solver_args(
-    altitude_m: float | jnp.ndarray,
-    args: SolverArgs,
-) -> jnp.ndarray:
-    """Return atmospheric density using plain numeric solver arguments."""
-
-    clipped_altitude_m = jnp.maximum(jnp.asarray(altitude_m), 0.0)
-    density = args.sea_level_density_kg_per_m3 * jnp.exp(
-        -clipped_altitude_m / args.scale_height_m,
-    )
-    return jnp.maximum(density, args.min_density_kg_per_m3)
-
-
-def _vector_field(
-    t: float,
-    y: jnp.ndarray,
-    args: SolverArgs,
-) -> jnp.ndarray:
-    """Return the vertical dynamics for Diffrax."""
-
-    del t
-    altitude_m = y[0]
-    velocity_m_per_s = y[1]
-    density = _density_from_solver_args(altitude_m, args)
-    drag_acceleration_m_per_s2 = (
-        0.5
-        * density
-        * args.drag_coefficient
-        * args.reference_area_m2
-        * velocity_m_per_s
-        * jnp.abs(velocity_m_per_s)
-        / args.mass_kg
-    )
-    acceleration_m_per_s2 = args.gravity_m_per_s2 - drag_acceleration_m_per_s2
-    return jnp.array(
-        [
-            -velocity_m_per_s,
-            acceleration_m_per_s2,
-        ],
-    )
-
-
 def _ground_event(
     t: float,
     y: jnp.ndarray,
-    args: SolverArgs,
+    args: object,
     **kwargs: object,
 ) -> jnp.ndarray:
     """Return whether the ground has been reached or crossed."""
@@ -197,46 +125,72 @@ def _interpolate_ground_impact(
     return updated_time_s, updated_states
 
 
-def run_simulation(config: SimulationConfig | None = None) -> SimulationResult:
+def run_simulation(config: Config | None = None) -> SimulationResult:
     """Run a full vertical fall simulation until ground impact."""
 
-    config = config or SimulationConfig()
+    config = config or Config()
     reference_area_m2 = float(cross_sectional_area(config.chicken.equivalent_radius_m))
-    solver_args = _build_solver_args(config, reference_area_m2)
-    term = diffrax.ODETerm(_vector_field)
+
+    def vector_field(t: float, y: jnp.ndarray, args: object) -> jnp.ndarray:
+        """Return the vertical dynamics for Diffrax."""
+
+        del t, args
+        altitude_m = y[0]
+        velocity_m_per_s = y[1]
+        density = density_at_altitude(altitude_m, config)
+        drag_acceleration_m_per_s2 = (
+            0.5
+            * density
+            * config.chicken.drag_coefficient
+            * reference_area_m2
+            * velocity_m_per_s
+            * jnp.abs(velocity_m_per_s)
+            / config.chicken.mass_kg
+        )
+        acceleration_m_per_s2 = (
+            config.constants.gravity_m_per_s2 - drag_acceleration_m_per_s2
+        )
+        return jnp.array(
+            [
+                -velocity_m_per_s,
+                acceleration_m_per_s2,
+            ],
+        )
+
+    term = diffrax.ODETerm(vector_field)
     # Diffrax does not ship a classical adaptive RK4 solver; Dopri5 is the
     # standard explicit adaptive Runge-Kutta replacement for this first version.
     solver = diffrax.Dopri5()
     stepsize_controller = diffrax.PIDController(
-        rtol=config.relative_tolerance,
-        atol=config.absolute_tolerance,
+        rtol=config.simulation.relative_tolerance,
+        atol=config.simulation.absolute_tolerance,
     )
     event = diffrax.Event(_ground_event)
     initial_state = jnp.array(
         [
-            config.initial_altitude_m,
-            config.initial_velocity_m_per_s,
+            config.simulation.initial_altitude_m,
+            config.simulation.initial_velocity_m_per_s,
         ],
     )
     solution = diffrax.diffeqsolve(
         term,
         solver,
         t0=0.0,
-        t1=config.max_time_s,
-        dt0=config.time_step_s,
+        t1=config.simulation.max_time_s,
+        dt0=config.simulation.initial_time_step_s,
         y0=initial_state,
-        args=solver_args,
+        args=None,
         saveat=diffrax.SaveAt(t0=True, steps=True),
         stepsize_controller=stepsize_controller,
         event=event,
-        max_steps=config.max_solver_steps,
+        max_steps=config.simulation.max_solver_steps,
     )
 
     time_s, states = _trim_solution(solution)
     time_s, states = _interpolate_ground_impact(time_s, states)
     altitude_m = jnp.maximum(states[:, 0], 0.0)
     velocity_m_per_s = states[:, 1]
-    density_kg_per_m3 = density_at_altitude(altitude_m, config.atmosphere)
+    density_kg_per_m3 = density_at_altitude(altitude_m, config)
     drag_force_n = drag_force_magnitude(
         density_kg_per_m3=density_kg_per_m3,
         speed_m_per_s=velocity_m_per_s,
@@ -246,10 +200,10 @@ def run_simulation(config: SimulationConfig | None = None) -> SimulationResult:
     terminal_velocity_m_per_s = local_terminal_velocity(
         mass_kg=config.chicken.mass_kg,
         density_kg_per_m3=density_kg_per_m3,
-        gravity_m_per_s2=config.gravity_m_per_s2,
+        gravity_m_per_s2=config.constants.gravity_m_per_s2,
         drag_coefficient=config.chicken.drag_coefficient,
         reference_area_m2=reference_area_m2,
-        density_floor_kg_per_m3=config.atmosphere.min_density_kg_per_m3,
+        density_floor_kg_per_m3=1.0e-12,
     )
     drag_power_w = drag_power_dissipation(
         density_kg_per_m3=density_kg_per_m3,
@@ -266,9 +220,9 @@ def run_simulation(config: SimulationConfig | None = None) -> SimulationResult:
         [jnp.asarray([0.0]), jnp.cumsum(energy_step_j)],
     )
     cumulative_transferred_energy_j = (
-        cumulative_drag_energy_j * config.chicken.energy_transfer_fraction
+        cumulative_drag_energy_j * config.simulation.energy_transfer_fraction
     )
-    hit_ground = bool(float(altitude_m[-1]) <= config.absolute_tolerance)
+    hit_ground = bool(float(altitude_m[-1]) <= config.simulation.absolute_tolerance)
 
     return SimulationResult(
         config=config,
@@ -297,7 +251,7 @@ def summarize_simulation(result: SimulationResult) -> SimulationSummary:
         max_drag_power_w=float(jnp.max(result.drag_power_w)),
         total_drag_energy_j=float(result.cumulative_drag_energy_j[-1]),
         transferred_energy_j=float(result.cumulative_transferred_energy_j[-1]),
-        energy_transfer_fraction=result.config.chicken.energy_transfer_fraction,
+        energy_transfer_fraction=result.config.simulation.energy_transfer_fraction,
     )
 
 

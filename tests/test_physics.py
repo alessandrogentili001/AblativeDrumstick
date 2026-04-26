@@ -1,5 +1,6 @@
 """Tests for the physics helpers."""
 
+import jax
 import pytest
 
 from chicken_from_space.physics import (
@@ -66,3 +67,22 @@ def test_drag_power_is_non_negative() -> None:
     )
 
     assert power >= 0.0
+
+
+def test_drag_force_can_be_jitted() -> None:
+    """Physics helpers should work under direct JIT."""
+
+    area = float(cross_sectional_area(0.1))
+    drag_fn = jax.jit(drag_force_magnitude)
+
+    assert float(drag_fn(1.225, 10.0, 0.47, area)) > 0.0
+
+
+def test_composed_physics_can_be_jitted() -> None:
+    """JAX should compile a composed function that calls plain helpers."""
+
+    def power_from_radius(radius_m: float) -> float:
+        area = cross_sectional_area(radius_m)
+        return drag_power_dissipation(1.225, 50.0, 0.47, area)
+
+    assert float(jax.jit(power_from_radius)(0.1)) > 0.0
