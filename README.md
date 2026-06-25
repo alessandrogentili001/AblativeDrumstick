@@ -113,6 +113,18 @@ Run the default simulation:
 python scripts/run_basic_simulation.py
 ```
 
+Run the thermal simulation and threshold cooking search:
+
+```bash
+python scripts/run_thermal_simulation.py
+```
+
+Or run it for a specific initial altitude:
+
+```bash
+python scripts/run_thermal_simulation.py --altitude 600000
+```
+
 For a step-by-step walkthrough, open:
 
 ```text

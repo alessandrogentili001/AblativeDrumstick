@@ -11,7 +11,9 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+# pyrefly: ignore [missing-import]
 from chicken_from_space.config import Config
+# pyrefly: ignore [missing-import]
 from chicken_from_space.simulation import (
     format_summary,
     run_simulation,

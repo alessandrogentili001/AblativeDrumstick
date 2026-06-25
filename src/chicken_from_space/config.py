@@ -1,5 +1,6 @@
 """Project configuration objects."""
 
+# pyrefly: ignore [missing-import]
 import jax
 
 from dataclasses import asdict, dataclass, field
@@ -55,6 +56,20 @@ class Simulation:
 
 @jax.tree_util.register_dataclass
 @dataclass(frozen=True)
+class Thermal:
+    """Thermal parameters for the chicken and heating model."""
+
+    density_kg_per_m3: float = 1000.0
+    specific_heat_j_per_kg_k: float = 3200.0
+    conductivity_w_per_m_k: float = 0.5
+    emissivity: float = 0.95
+    initial_temperature_k: float = 277.15  # 4 C
+    target_cook_temperature_k: float = 347.15  # 74 C
+    grid_nodes: int = 10
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
 class Config:
     """Top-level project configuration."""
 
@@ -62,6 +77,7 @@ class Config:
     atmosphere: Atmosphere = field(default_factory=Atmosphere)
     chicken: Chicken = field(default_factory=Chicken)
     simulation: Simulation = field(default_factory=Simulation)
+    thermal: Thermal = field(default_factory=Thermal)
 
     def to_dict(self) -> dict[str, object]:
         """Return a plain nested dictionary representation."""

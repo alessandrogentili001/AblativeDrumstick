@@ -1,6 +1,8 @@
 """Atmospheric state functions for a compact layered model."""
 
+# pyrefly: ignore [missing-import]
 import jax
+# pyrefly: ignore [missing-import]
 import jax.numpy as jnp
 
 from chicken_from_space.config import Config

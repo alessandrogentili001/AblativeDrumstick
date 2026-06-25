@@ -3,17 +3,26 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+# pyrefly: ignore [missing-import]
 import diffrax
+# pyrefly: ignore [missing-import]
 import jax.numpy as jnp
 import numpy as np
 
-from chicken_from_space.atmosphere import density_at_altitude
+from chicken_from_space.atmosphere import atmospheric_temperature, density_at_altitude
 from chicken_from_space.config import Config
 from chicken_from_space.physics import (
+    air_conductivity,
+    air_viscosity_sutherland,
+    convective_heat_transfer_coefficient,
     cross_sectional_area,
     drag_force_magnitude,
     drag_power_dissipation,
     local_terminal_velocity,
+    mach_number,
+    net_surface_heat_flux,
+    recovery_temperature,
+    speed_of_sound,
 )
 
 
@@ -32,6 +41,7 @@ class SimulationResult:
     drag_power_w: jnp.ndarray
     cumulative_drag_energy_j: jnp.ndarray
     cumulative_transferred_energy_j: jnp.ndarray
+    temperature_k: jnp.ndarray  # shape: (num_steps, N)
 
     def as_numpy_dict(self) -> dict[str, np.ndarray]:
         """Return the stored arrays as NumPy arrays."""
@@ -48,6 +58,8 @@ class SimulationResult:
             "cumulative_transferred_energy_j": np.asarray(
                 self.cumulative_transferred_energy_j,
             ),
+            "center_temperature_k": np.asarray(self.temperature_k[:, 0]),
+            "surface_temperature_k": np.asarray(self.temperature_k[:, -1]),
         }
 
 
@@ -63,6 +75,12 @@ class SimulationSummary:
     total_drag_energy_j: float
     transferred_energy_j: float
     energy_transfer_fraction: float
+    cooked: bool
+    cook_time_s: float | None
+    cook_altitude_m: float | None
+    cook_velocity_m_per_s: float | None
+    max_center_temperature_k: float
+    max_surface_temperature_k: float
 
 
 def _ground_event(
@@ -130,13 +148,17 @@ def run_simulation(config: Config | None = None) -> SimulationResult:
 
     config = config or Config()
     reference_area_m2 = float(cross_sectional_area(config.chicken.equivalent_radius_m))
+    n_nodes = config.thermal.grid_nodes
 
     def vector_field(t: float, y: jnp.ndarray, args: object) -> jnp.ndarray:
-        """Return the vertical dynamics for Diffrax."""
+        """Return the vertical dynamics and thermal conduction derivatives."""
 
         del t, args
         altitude_m = y[0]
         velocity_m_per_s = y[1]
+        temps = y[2:]
+
+        # 1. Trajectory dynamics
         density = density_at_altitude(altitude_m, config)
         drag_acceleration_m_per_s2 = (
             0.5
@@ -150,28 +172,96 @@ def run_simulation(config: Config | None = None) -> SimulationResult:
         acceleration_m_per_s2 = (
             config.constants.gravity_m_per_s2 - drag_acceleration_m_per_s2
         )
-        return jnp.array(
+
+        # 2. Thermal boundary-layer heat transfer
+        t_ambient = atmospheric_temperature(altitude_m, config)
+        c_s = speed_of_sound(t_ambient)
+        mach = mach_number(velocity_m_per_s, c_s)
+        t_recovery = recovery_temperature(t_ambient, mach)
+
+        mu = air_viscosity_sutherland(t_ambient)
+        k_f = air_conductivity(mu)
+        d_chicken = 2.0 * config.chicken.equivalent_radius_m
+
+        h_c = convective_heat_transfer_coefficient(
+            density_kg_per_m3=density,
+            speed_m_per_s=velocity_m_per_s,
+            diameter_m=d_chicken,
+            viscosity_pa_s=mu,
+            conductivity_w_per_m_k=k_f,
+        )
+
+        t_surface = temps[-1]
+        q_surf = net_surface_heat_flux(
+            h_c=h_c,
+            t_recovery=t_recovery,
+            t_surface=t_surface,
+            t_ambient=t_ambient,
+            emissivity=config.thermal.emissivity,
+        )
+
+        # 3. 1D Spherical conduction discretization
+        rho_c = config.thermal.density_kg_per_m3
+        cp_c = config.thermal.specific_heat_j_per_kg_k
+        k_c = config.thermal.conductivity_w_per_m_k
+        alpha_c = k_c / (rho_c * cp_c)
+
+        r_max = config.chicken.equivalent_radius_m
+        dr = r_max / (n_nodes - 1)
+
+        dT_dt = jnp.zeros(n_nodes)
+
+        # Center node (i = 0)
+        dT_dt = dT_dt.at[0].set(6.0 * alpha_c * (temps[1] - temps[0]) / (dr**2))
+
+        # Intermediate nodes (i = 1 to n_nodes - 2)
+        i_idx = jnp.arange(1, n_nodes - 1)
+        r_i = i_idx * dr
+        dT_dt = dT_dt.at[i_idx].set(
+            alpha_c
+            * (
+                (temps[i_idx + 1] - 2.0 * temps[i_idx] + temps[i_idx - 1]) / (dr**2)
+                + (2.0 / r_i) * (temps[i_idx + 1] - temps[i_idx - 1]) / (2.0 * dr)
+            )
+        )
+
+        # Surface node (i = n_nodes - 1)
+        dT_dt = dT_dt.at[-1].set(
+            (2.0 / (rho_c * cp_c * dr))
+            * (
+                q_surf
+                - ((1.0 - dr / (2.0 * r_max)) ** 2) * k_c * (temps[-1] - temps[-2]) / dr
+            )
+        )
+
+        return jnp.concatenate(
             [
-                -velocity_m_per_s,
-                acceleration_m_per_s2,
-            ],
+                jnp.array([-velocity_m_per_s, acceleration_m_per_s2]),
+                dT_dt,
+            ]
         )
 
     term = diffrax.ODETerm(vector_field)
-    # Diffrax does not ship a classical adaptive RK4 solver; Dopri5 is the
-    # standard explicit adaptive Runge-Kutta replacement for this first version.
     solver = diffrax.Dopri5()
     stepsize_controller = diffrax.PIDController(
         rtol=config.simulation.relative_tolerance,
         atol=config.simulation.absolute_tolerance,
     )
     event = diffrax.Event(_ground_event)
-    initial_state = jnp.array(
+
+    init_temps = jnp.full((n_nodes,), config.thermal.initial_temperature_k)
+    initial_state = jnp.concatenate(
         [
-            config.simulation.initial_altitude_m,
-            config.simulation.initial_velocity_m_per_s,
-        ],
+            jnp.array(
+                [
+                    config.simulation.initial_altitude_m,
+                    config.simulation.initial_velocity_m_per_s,
+                ]
+            ),
+            init_temps,
+        ]
     )
+
     solution = diffrax.diffeqsolve(
         term,
         solver,
@@ -190,6 +280,8 @@ def run_simulation(config: Config | None = None) -> SimulationResult:
     time_s, states = _interpolate_ground_impact(time_s, states)
     altitude_m = jnp.maximum(states[:, 0], 0.0)
     velocity_m_per_s = states[:, 1]
+    temperature_k = states[:, 2:]
+
     density_kg_per_m3 = density_at_altitude(altitude_m, config)
     drag_force_n = drag_force_magnitude(
         density_kg_per_m3=density_kg_per_m3,
@@ -212,6 +304,7 @@ def run_simulation(config: Config | None = None) -> SimulationResult:
         reference_area_m2=reference_area_m2,
     )
 
+    # Integrated drag energy
     energy_step_j = jnp.maximum(
         0.5 * (drag_power_w[1:] + drag_power_w[:-1]) * jnp.diff(time_s),
         0.0,
@@ -219,9 +312,40 @@ def run_simulation(config: Config | None = None) -> SimulationResult:
     cumulative_drag_energy_j = jnp.concatenate(
         [jnp.asarray([0.0]), jnp.cumsum(energy_step_j)],
     )
-    cumulative_transferred_energy_j = (
-        cumulative_drag_energy_j * config.simulation.energy_transfer_fraction
+
+    # Integrated transferred thermal energy entering the chicken surface
+    t_ambient_history = atmospheric_temperature(altitude_m, config)
+    c_s_history = speed_of_sound(t_ambient_history)
+    mach_history = mach_number(velocity_m_per_s, c_s_history)
+    t_recovery_history = recovery_temperature(t_ambient_history, mach_history)
+    mu_history = air_viscosity_sutherland(t_ambient_history)
+    k_f_history = air_conductivity(mu_history)
+    d_chicken = 2.0 * config.chicken.equivalent_radius_m
+
+    h_c_history = convective_heat_transfer_coefficient(
+        density_kg_per_m3=density_kg_per_m3,
+        speed_m_per_s=velocity_m_per_s,
+        diameter_m=d_chicken,
+        viscosity_pa_s=mu_history,
+        conductivity_w_per_m_k=k_f_history,
     )
+
+    t_surface_history = temperature_k[:, -1]
+    q_surf_history = net_surface_heat_flux(
+        h_c=h_c_history,
+        t_recovery=t_recovery_history,
+        t_surface=t_surface_history,
+        t_ambient=t_ambient_history,
+        emissivity=config.thermal.emissivity,
+    )
+
+    a_surf = 4.0 * jnp.pi * (config.chicken.equivalent_radius_m**2)
+    heat_power_w = q_surf_history * a_surf
+    heat_energy_step_j = 0.5 * (heat_power_w[1:] + heat_power_w[:-1]) * jnp.diff(time_s)
+    cumulative_transferred_energy_j = jnp.concatenate(
+        [jnp.asarray([0.0]), jnp.cumsum(heat_energy_step_j)],
+    )
+
     hit_ground = bool(float(altitude_m[-1]) <= config.simulation.absolute_tolerance)
 
     return SimulationResult(
@@ -236,6 +360,7 @@ def run_simulation(config: Config | None = None) -> SimulationResult:
         drag_power_w=drag_power_w,
         cumulative_drag_energy_j=cumulative_drag_energy_j,
         cumulative_transferred_energy_j=cumulative_transferred_energy_j,
+        temperature_k=temperature_k,
     )
 
 
@@ -243,15 +368,46 @@ def summarize_simulation(result: SimulationResult) -> SimulationSummary:
     """Build a compact summary for a finished simulation."""
 
     speed_m_per_s = jnp.abs(result.velocity_m_per_s)
+    center_temp = result.temperature_k[:, 0]
+    surface_temp = result.temperature_k[:, -1]
+
+    cook_threshold = result.config.thermal.target_cook_temperature_k
+    cooked_mask = center_temp >= cook_threshold
+    cooked = bool(jnp.any(cooked_mask))
+
+    if cooked:
+        cook_idx = int(jnp.argmax(cooked_mask))
+        cook_time_s = float(result.time_s[cook_idx])
+        cook_altitude_m = float(result.altitude_m[cook_idx])
+        cook_velocity_m_per_s = float(result.velocity_m_per_s[cook_idx])
+    else:
+        cook_time_s = None
+        cook_altitude_m = None
+        cook_velocity_m_per_s = None
+
+    total_drag_energy_j = float(result.cumulative_drag_energy_j[-1])
+    transferred_energy_j = float(result.cumulative_transferred_energy_j[-1])
+
+    if total_drag_energy_j > 0.0:
+        energy_transfer_fraction = transferred_energy_j / total_drag_energy_j
+    else:
+        energy_transfer_fraction = 0.0
+
     return SimulationSummary(
         hit_ground=result.hit_ground,
         total_fall_time_s=float(result.time_s[-1]),
         final_velocity_m_per_s=float(result.velocity_m_per_s[-1]),
         max_speed_m_per_s=float(jnp.max(speed_m_per_s)),
         max_drag_power_w=float(jnp.max(result.drag_power_w)),
-        total_drag_energy_j=float(result.cumulative_drag_energy_j[-1]),
-        transferred_energy_j=float(result.cumulative_transferred_energy_j[-1]),
-        energy_transfer_fraction=result.config.simulation.energy_transfer_fraction,
+        total_drag_energy_j=total_drag_energy_j,
+        transferred_energy_j=transferred_energy_j,
+        energy_transfer_fraction=energy_transfer_fraction,
+        cooked=cooked,
+        cook_time_s=cook_time_s,
+        cook_altitude_m=cook_altitude_m,
+        cook_velocity_m_per_s=cook_velocity_m_per_s,
+        max_center_temperature_k=float(jnp.max(center_temp)),
+        max_surface_temperature_k=float(jnp.max(surface_temp)),
     )
 
 
@@ -259,20 +415,34 @@ def format_summary(summary: SimulationSummary) -> str:
     """Format a readable simulation summary."""
 
     ground_status = "yes" if summary.hit_ground else "no"
-    return "\n".join(
-        [
-            "Chicken From Space: Basic Simulation",
-            "------------------------------------",
-            f"Ground reached: {ground_status}",
-            f"Total fall time: {summary.total_fall_time_s:,.2f} s",
-            f"Final velocity: {summary.final_velocity_m_per_s:,.2f} m/s downward",
-            f"Maximum speed: {summary.max_speed_m_per_s:,.2f} m/s",
-            f"Peak drag power: {summary.max_drag_power_w:,.2f} W",
-            f"Total drag-dissipated energy: {summary.total_drag_energy_j:,.2f} J",
-            f"Energy transfer fraction: {summary.energy_transfer_fraction:.2%}",
-            f"Estimated energy transferred to chicken: {summary.transferred_energy_j:,.2f} J",
-        ],
-    )
+    cook_status = "yes" if summary.cooked else "no"
+
+    lines = [
+        "Chicken From Space: Basic Simulation",
+        "------------------------------------",
+        f"Ground reached: {ground_status}",
+        f"Total fall time: {summary.total_fall_time_s:,.2f} s",
+        f"Final velocity: {summary.final_velocity_m_per_s:,.2f} m/s downward",
+        f"Maximum speed: {summary.max_speed_m_per_s:,.2f} m/s",
+        f"Peak drag power: {summary.max_drag_power_w:,.2f} W",
+        f"Total drag-dissipated energy: {summary.total_drag_energy_j:,.2f} J",
+        f"Actual energy absorbed fraction: {summary.energy_transfer_fraction:.2%}",
+        f"Actual energy absorbed by chicken: {summary.transferred_energy_j:,.2f} J",
+        f"Max core temperature: {summary.max_center_temperature_k - 273.15:.2f} C",
+        f"Max surface temperature: {summary.max_surface_temperature_k - 273.15:.2f} C",
+        f"Perfectly cooked: {cook_status}",
+    ]
+
+    if summary.cooked:
+        lines.extend(
+            [
+                f"  - Cooked time: {summary.cook_time_s:,.2f} s",
+                f"  - Cooked altitude: {summary.cook_altitude_m:,.2f} m",
+                f"  - Cooked velocity: {summary.cook_velocity_m_per_s:,.2f} m/s",
+            ]
+        )
+
+    return "\n".join(lines)
 
 
 def save_simulation_data(result: SimulationResult, output_path: str | Path) -> Path:
@@ -283,7 +453,7 @@ def save_simulation_data(result: SimulationResult, output_path: str | Path) -> P
 
     arrays = result.as_numpy_dict()
     if output_path.suffix.lower() == ".npz":
-        np.savez(output_path, **arrays)
+        np.savez(output_path, temperature_k=np.asarray(result.temperature_k), **arrays)
         return output_path
 
     if output_path.suffix.lower() == ".csv":

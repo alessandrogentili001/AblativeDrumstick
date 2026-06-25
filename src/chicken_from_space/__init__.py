@@ -1,6 +1,6 @@
 """Chicken From Space simulation package."""
 
-from chicken_from_space.config import Atmosphere, Chicken, Config, Constants, Simulation
+from chicken_from_space.config import Atmosphere, Chicken, Config, Constants, Simulation, Thermal
 from chicken_from_space.simulation import (
     SimulationResult,
     SimulationSummary,
@@ -16,6 +16,7 @@ __all__ = [
     "Config",
     "Constants",
     "Simulation",
+    "Thermal",
     "SimulationResult",
     "SimulationSummary",
     "format_summary",

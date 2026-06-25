@@ -1,13 +1,16 @@
 """Tests for the atmosphere module."""
 
+# pyrefly: ignore [missing-import]
 import jax
 import pytest
 
+# pyrefly: ignore [missing-import]
 from chicken_from_space.atmosphere import (
     atmospheric_density,
     atmospheric_pressure,
     atmospheric_temperature,
 )
+# pyrefly: ignore [missing-import]
 from chicken_from_space.config import Atmosphere, Config
 
 
