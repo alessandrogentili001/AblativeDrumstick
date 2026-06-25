@@ -89,6 +89,24 @@ So no, the repo does not yet answer whether the center reaches a safe temperatur
 
 ## Run
 
+First, set up a virtual environment and install the dependencies:
+
+```bash
+# Create the virtual environment
+python -m venv venv
+
+# Activate it
+# On Windows (PowerShell):
+.\venv\Scripts\Activate.ps1
+# On Windows (cmd):
+.\venv\Scripts\activate.bat
+# On macOS/Linux:
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
 Run the default simulation:
 
 ```bash

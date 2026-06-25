@@ -1,0 +1,5 @@
+jax
+diffrax
+numpy
+pytest
+ipykernel
